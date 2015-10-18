@@ -11,7 +11,8 @@ using namespace std;
 
 typedef std::list<std::vector<uint8_t>> sstack_t;
 
-void process_opcode(uint8_t *&ip, sstack_t &stack);
+void process_opcode(uint8_t *&ip, sstack_t &stack, bool &execute, vector<bool> &conditional_nestting,
+                    bool &transaction_is_valid);
 
 const char *opcode_to_str(uint8_t opcode) {
 
@@ -57,7 +58,7 @@ const char *opcode_to_str(uint8_t opcode) {
 int print_script(uint8_t *script, size_t script_len) {
     uint8_t *script_start = script;
 
-    while(script < script_start + script_len) {
+    while (script < script_start + script_len) {
 
         const char *opcode_str = opcode_to_str(*script);
 
@@ -105,33 +106,49 @@ int main() {
     sstack_t stack;
     uint8_t *ip = bytecode;
 
-    while(ip < bytecode + bytecode_len) {
-        process_opcode(ip, stack);
+
+    bool execute = true;
+    bool transaction_is_valid = true;
+    vector<bool> conditional_nesting;
+
+    while (ip < bytecode + bytecode_len) {
+        process_opcode(ip, stack, execute, conditional_nesting, transaction_is_valid);
         ip++;
     }
-
+    printf("Stack has %lu element(s).\n", stack.size());
 
     puts("~~STACKBOTTOM~~");
     print_stack(stack);
     puts("~~STACKTOP~~");
-    printf("%lu\n", stack.size());
 
     free(bytecode);
 
     return 0;
 }
 
+// Utils
+
+// A vector is considered to be false if it's empty or contains only one zero.
+inline bool vec_truth(vector<uint8_t> &vec) {
+    return !(vec.size() == 0 || (vec.size() == 1 && vec.at(0) == 0));
+}
+
 // Words
 /// Constants
-inline void op_false(sstack_t &stack) {
-    stack.emplace_back(vector<uint8_t>(0));
+
+inline void op_false(sstack_t &stack, bool &execute) {
+    if (execute) { stack.emplace_back(vector<uint8_t>(0)); };
 }
-inline void op_pushn(uint8_t *&ip, sstack_t &stack) {
+
+inline void op_pushn(uint8_t *&ip, sstack_t &stack, bool &execute) {
     uint_fast8_t bytes_to_push = ip[0];
-    stack.emplace_back(vector<uint8_t>(ip + 1, ip + 1 + *ip));
+    if (execute) {
+        stack.emplace_back(vector<uint8_t>(ip + 1, ip + 1 + *ip));
+    }
     ip += *ip;
 }
-inline void op_pushdataN(uint8_t *&ip, sstack_t &stack) {
+
+inline void op_pushdataN(uint8_t *&ip, sstack_t &stack, bool &execute) {
 
     uint8_t opcode = *ip;
     int_fast8_t indicator_len;
@@ -156,33 +173,170 @@ inline void op_pushdataN(uint8_t *&ip, sstack_t &stack) {
             return;
     }
 
-    stack.emplace_back(vector<uint8_t>(ip + 2, ip + 2 + bytes_to_push));
+    if (execute) {
+        stack.emplace_back(vector<uint8_t>(ip + 2, ip + 2 + bytes_to_push));
+    }
+
     ip += bytes_to_push + indicator_len;
 }
-inline void op_1negate(uint8_t *&ip, sstack_t &stack) {
-    stack.emplace_back(vector<uint8_t>() = {(uint8_t) -1 });
-}
-inline void op_true(uint8_t *&ip, sstack_t &stack) {
-    stack.emplace_back(vector<uint8_t>() = {1});
-}
-inline void op_N(uint8_t *&ip, sstack_t &stack) {
 
-    uint8_t opcode = *ip;
-    uint8_t byte_to_push = (uint8_t) (opcode - 80);
-    stack.emplace_back(vector<uint8_t>() = {byte_to_push});
-
+inline void op_1negate(uint8_t *&ip, sstack_t &stack, bool &execute) {
+    if (execute) {
+        stack.emplace_back(vector<uint8_t>() = {(uint8_t) -1});
+    }
 }
 
-void process_opcode(uint8_t *&ip, sstack_t &stack) {
+inline void op_true(uint8_t *&ip, sstack_t &stack, bool &execute) {
+    if (execute) {
+        stack.emplace_back(vector<uint8_t>() = {1});
+    }
+}
+
+inline void op_N(uint8_t *&ip, sstack_t &stack, bool &execute) {
+    if (execute) {
+        uint8_t opcode = *ip;
+        uint8_t byte_to_push = (uint8_t) (opcode - 80);
+        stack.emplace_back(vector<uint8_t>() = {byte_to_push});
+    }
+}
+
+/// Flow control
+
+inline void op_if(uint8_t *&ip, sstack_t &stack, bool &execute, vector<bool> &conditional_nesting) {
+
+    if (execute) {
+
+        conditional_nesting.push_back(true);
+
+        bool truth = vec_truth(stack.back());
+
+        if (!truth) {
+            execute = false;
+        }
+        stack.pop_back();
+    }
+    else {
+        // Tell to ignore anything until next OP_ENDIF.
+        conditional_nesting.push_back(false);
+    }
+
+}
+
+inline void op_notif(uint8_t *&ip, sstack_t &stack, bool &execute, vector<bool> &conditional_nesting) {
+
+    if (execute) {
+
+        conditional_nesting.push_back(true);
+
+        bool truth = vec_truth(stack.back());
+
+        if (truth) {
+            execute = false;
+        }
+        stack.pop_back();
+    }
+    else {
+        // Tell to ignore anything until next OP_ENDIF.
+        conditional_nesting.push_back(false);
+    }
+
+}
+
+inline void op_else(uint8_t *&ip, sstack_t &stack, bool &execute, vector<bool> &conditional_nesting) {
+
+    bool in_executable_branch = conditional_nesting.back();
+
+    if (in_executable_branch) {
+        execute = !execute;
+    }
+}
+
+inline void op_endif(uint8_t *&ip, sstack_t &stack, bool &execute, vector<bool> &conditional_nesting) {
+
+    bool in_executable_branch = conditional_nesting.back();
+    conditional_nesting.pop_back();
+
+    if (in_executable_branch) {
+        execute = true;
+    }
+}
+
+inline void op_verify(sstack_t &stack, bool &execute, bool &transaction_is_valid) {
+
+    if (execute) {
+
+        bool truth = vec_truth(stack.back());
+
+        if (!truth) {
+            transaction_is_valid = false;
+        }
+    }
+}
+
+inline void op_return(bool &execute, bool &transaction_is_valid) {
+
+    if (execute) {
+        transaction_is_valid = false;
+    }
+}
+
+void process_opcode(uint8_t *&ip, sstack_t &stack, bool &execute, vector<bool> &conditional_nesting,
+                    bool &transaction_is_valid) {
 
     uint8_t opcode = *ip;
 
     // Constants
-    if (opcode == 0) { op_false(stack); return;}
-    if (opcode >= 1 && opcode <= 75) { op_pushn(ip, stack); ip+=opcode; return; }
-    if (opcode >= 76 && opcode <= 78) { op_pushdataN(ip, stack); return; }
-    if (opcode == 79) { op_1negate(ip, stack); return; }
-    if (opcode == 80) { op_true(ip, stack); return; }
-    if (opcode >= 82 && opcode <= 96) { op_N(ip, stack); return; }
+    if (opcode == 0) {
+        op_false(stack, execute);
+        return;
+    }
+    if (opcode >= 1 && opcode <= 75) {
+        op_pushn(ip, stack, execute);
+        ip += opcode;
+        return;
+    }
+    if (opcode >= 76 && opcode <= 78) {
+        op_pushdataN(ip, stack, execute);
+        return;
+    }
+    if (opcode == 79) {
+        op_1negate(ip, stack, execute);
+        return;
+    }
+    if (opcode == 81) {
+        op_true(ip, stack, execute);
+        return;
+    }
+    if (opcode >= 82 && opcode <= 96) {
+        op_N(ip, stack, execute);
+        return;
+    }
+
+    // Flow control
+    if (opcode == 97) { return; }
+    if (opcode == 99) {
+        op_if(ip, stack, execute, conditional_nesting);
+        return;
+    }
+    if (opcode == 100) {
+        op_notif(ip, stack, execute, conditional_nesting);
+        return;
+    }
+    if (opcode == 103) {
+        op_else(ip, stack, execute, conditional_nesting);
+        return;
+    }
+    if (opcode == 104) {
+        op_endif(ip, stack, execute, conditional_nesting);
+        return;
+    }
+    if (opcode == 105) {
+        op_verify(stack, execute, transaction_is_valid);
+        return;
+    }
+    if (opcode == 106) {
+        op_return(execute, transaction_is_valid);
+        return;
+    }
 
 }

@@ -3,6 +3,7 @@
 #include <list>
 #include <sstream>
 #include <array>
+#include <string.h>
 
 using namespace std;
 
@@ -11,7 +12,7 @@ using namespace std;
 
 typedef std::list<std::vector<uint8_t>> sstack_t;
 
-void process_opcode(uint8_t *&ip, sstack_t &stack, bool &execute, vector<bool> &conditional_nestting,
+void process_opcode(uint8_t *&ip, sstack_t &stack, sstack_t &alt_stack, bool &execute, vector<bool> &conditional_nestting,
                     bool &transaction_is_valid);
 
 const char *opcode_to_str(uint8_t opcode) {
@@ -104,6 +105,7 @@ int main() {
     // Execute program
 
     sstack_t stack;
+    sstack_t alt_stack;
     uint8_t *ip = bytecode;
 
 
@@ -112,14 +114,21 @@ int main() {
     vector<bool> conditional_nesting;
 
     while (ip < bytecode + bytecode_len) {
-        process_opcode(ip, stack, execute, conditional_nesting, transaction_is_valid);
+        process_opcode(ip, stack, alt_stack, execute, conditional_nesting, transaction_is_valid);
         ip++;
     }
+    printf("Transaction is considered %svalid.\n", transaction_is_valid ? "" : "in");
     printf("Stack has %lu element(s).\n", stack.size());
 
     puts("~~STACKBOTTOM~~");
     print_stack(stack);
     puts("~~STACKTOP~~");
+    puts("");
+    printf("Alternative stack has %lu element(s).\n", alt_stack.size());
+
+    puts("~~ALTSTACKBOTTOM~~");
+    print_stack(alt_stack);
+    puts("~~ALTSTACKTOP~~");
 
     free(bytecode);
 
@@ -128,7 +137,7 @@ int main() {
 
 // Utils
 
-// A vector is considered to be false if it's empty or contains only one zero.
+/// Returns true if the vector can be considered true.
 inline bool vec_truth(vector<uint8_t> &vec) {
 
     // An empty vector is considered false.
@@ -147,6 +156,22 @@ inline bool vec_truth(vector<uint8_t> &vec) {
     }
     return false;
 }
+
+///
+inline uint64_t vec_to_long(vector<uint8_t> &vec) {
+
+    if (vec.size() <= 8) {
+        // Everything is little endian (for once it makes me happy).
+        uint64_t ret = 0;
+        memcpy(&ret, &vec[0], vec.size());
+        return ret;
+    }
+    else {
+        // Todo: throw something to say: "HAY, WE CANNOT REPRESENT THIS NUMBER NATIVELY! :'("
+        return 0;
+    }
+}
+
 
 // Words
 /// Constants
@@ -295,7 +320,152 @@ inline void op_return(bool &execute, bool &transaction_is_valid) {
     }
 }
 
-void process_opcode(uint8_t *&ip, sstack_t &stack, bool &execute, vector<bool> &conditional_nesting,
+/// Stack
+
+inline void op_toaltstack(sstack_t &stack, sstack_t &alt_stack, bool execute) {
+    if (execute) {
+        alt_stack.emplace_back(std::move(stack.back()));
+        stack.pop_back();
+    }
+}
+inline void op_fromaltstack(sstack_t &stack, sstack_t &alt_stack, bool execute) {
+    if (execute) {
+        stack.emplace_back(std::move(alt_stack.back()));
+        alt_stack.pop_back();
+    }
+}
+inline void op_dup(sstack_t &stack, bool execute) {
+    if (execute) {
+        stack.emplace_back(vector<uint8_t>(stack.back()));
+    }
+}
+inline void op_ifdup(sstack_t &stack, bool execute) {
+    if (execute) {
+        if (vec_truth(stack.back())) {
+            op_dup(stack, execute);
+        }
+    }
+}
+inline void op_depth(sstack_t &stack, bool execute) {
+    if (execute) {
+        stack.emplace_back(vector<uint8_t>() = { stack.size() });
+    }
+}
+inline void op_drop(sstack_t &stack, bool execute) {
+    if (execute) {
+        stack.pop_back();
+    }
+}
+
+// Remove second to top stack item.
+inline void op_nip(sstack_t &stack, bool execute) {
+    if (execute) {
+        stack.erase(--stack.end());
+    }
+}
+
+// Remove second to top stack item.
+inline void op_over(sstack_t &stack, bool execute) {
+    if (execute) {
+        stack.emplace_back(*(--stack.end()));
+    }
+}
+
+// Copies the second-to-top stack item to the top.
+inline void op_pick(sstack_t &stack, bool execute) {
+    if (execute) {
+
+        uint64_t nth_back = vec_to_long(stack.back());
+        stack.pop_back();
+
+        auto stack_itr = stack.end();
+        std::prev(stack_itr, nth_back);
+
+        stack.emplace_back(*stack_itr);
+    }
+}
+
+inline void helper_op_rotfamily(sstack_t &stack, uint64_t nth) {
+    stack.splice(stack.end(), stack, std::prev(stack.end(), nth));
+}
+
+// Moves the second-to-top stack item to the top.
+inline void op_rot(sstack_t &stack, bool execute) {
+    if (execute) {
+        helper_op_rotfamily(stack, 3);
+    }
+}
+
+// Moves the nth-to-top stack item to the top. Nth is the number on the TOS.
+inline void op_roll(sstack_t &stack, bool execute) {
+    if (execute) {
+
+        uint64_t nth_back = vec_to_long(stack.back());
+        stack.pop_back();
+        helper_op_rotfamily(stack, nth_back);
+    }
+}
+
+// Moves the second-to-top stack item to the top.
+inline void op_swap(sstack_t &stack, bool execute) {
+    if (execute) {
+        helper_op_rotfamily(stack, 2);
+    }
+}
+
+inline void op_tuck(sstack_t &stack, bool execute) {
+    if (execute) {
+        stack.emplace(std::prev(stack.end(), 2), vector<uint8_t>() = stack.back());
+    }
+}
+
+inline void op_2drop(sstack_t &stack, bool execute) {
+    if (execute) {
+        stack.pop_back();
+        stack.pop_back();
+    }
+}
+
+inline void helper_op_dup_family(sstack_t &stack, uint64_t nth) {
+    stack.insert(stack.end(), std::prev(stack.end(), nth), stack.end());
+
+}
+
+inline void op_2dup(sstack_t &stack, bool execute) {
+    if (execute) {
+        helper_op_dup_family(stack, 2);
+    }
+}
+
+inline void op_3dup(sstack_t &stack, bool execute) {
+    if (execute) {
+        helper_op_dup_family(stack, 3);
+    }
+}
+
+
+// Copies the pair of items two spaces back in the stack to the front.
+inline void op_2over(sstack_t &stack, bool execute) {
+    if (execute) {
+        stack.insert(stack.end(), std::prev(stack.end(), 4), std::prev(stack.end(), 2));
+    }
+}
+
+// Swaps the top two pairs of items.
+inline void op_2swap(sstack_t &stack, bool execute) {
+    if (execute) {
+        stack.splice(stack.end(), stack, std::prev(stack.end(), 4), std::prev(stack.end(), 2));
+    }
+}
+
+// Swaps the top two pairs of items.
+inline void op_2rot(sstack_t &stack, bool execute) {
+    if (execute) {
+        stack.splice(stack.end(), stack, std::prev(stack.end(), 6), std::prev(stack.end(), 4));
+    }
+}
+
+void process_opcode(uint8_t *&ip, sstack_t &stack, sstack_t &alt_stack, bool &execute, vector<bool> &conditional_nesting,
                     bool &transaction_is_valid) {
 
     uint8_t opcode = *ip;
@@ -354,4 +524,81 @@ void process_opcode(uint8_t *&ip, sstack_t &stack, bool &execute, vector<bool> &
         return;
     }
 
+    // Stack
+    if (opcode == 107) {
+        op_toaltstack(stack, alt_stack, execute);
+        return;
+    }
+    if (opcode == 108) {
+        op_fromaltstack(stack, alt_stack, execute);
+        return;
+    }
+    if (opcode == 115) {
+        op_ifdup(stack, execute);
+        return;
+    }
+    if (opcode == 116) {
+        op_depth(stack, execute);
+        return;
+    }
+    if (opcode == 117) {
+        op_drop(stack, execute);
+        return;
+    }
+    if (opcode == 118) {
+        op_drop(stack, execute);
+        return;
+    }
+    if (opcode == 119) {
+        op_nip(stack, execute);
+        return;
+    }
+    if (opcode == 120) {
+        op_over(stack, execute);
+        return;
+    }
+    if (opcode == 121) {
+        op_pick(stack, execute);
+        return;
+    }
+    if (opcode == 122) {
+        op_roll(stack, execute);
+        return;
+    }
+    if (opcode == 123) {
+        op_rot(stack, execute);
+        return;
+    }
+    if (opcode == 124) {
+        op_swap(stack, execute);
+        return;
+    }
+    if (opcode == 125) {
+        op_tuck(stack, execute);
+        return;
+    }
+    if (opcode == 109) {
+        op_2drop(stack, execute);
+        return;
+    }
+    if (opcode == 110) {
+        op_2dup(stack, execute);
+        return;
+    }
+    if (opcode == 111) {
+        op_3dup(stack, execute);
+        return;
+    }
+    if (opcode == 112) {
+        op_2over(stack, execute);
+        return;
+    }
+    if (opcode == 113) {
+        op_2rot(stack, execute);
+        return;
+    }
+    if (opcode == 114) {
+        op_2swap(stack, execute);
+        return;
+    }
 }

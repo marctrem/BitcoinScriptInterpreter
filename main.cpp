@@ -130,7 +130,22 @@ int main() {
 
 // A vector is considered to be false if it's empty or contains only one zero.
 inline bool vec_truth(vector<uint8_t> &vec) {
-    return !(vec.size() == 0 || (vec.size() == 1 && vec.at(0) == 0));
+
+    // An empty vector is considered false.
+    if (vec.empty()) {
+        return false;
+    }
+
+    // To be true the first byte must be other than be 0x00 or 0x80.
+    if (vec.front() & 0x7F) {
+        return true;
+    }
+
+    // Start from the second item and check if all bytes are zero.
+    for (auto it = vec.begin() + 1; it != vec.end(); it++) {
+        if (*it != 0) { return true; }
+    }
+    return false;
 }
 
 // Words
